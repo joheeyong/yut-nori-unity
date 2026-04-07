@@ -14,9 +14,9 @@ public class BoardView : MonoBehaviour
     // -----------------------------------------------------------------------
     //  Constants
     // -----------------------------------------------------------------------
-    const float CANVAS_W   = 900f;
-    const float CANVAS_H   = 700f;
-    const float BOARD_SIZE = 560f;
+    const float CANVAS_W   = 960f;
+    const float CANVAS_H   = 600f;
+    const float BOARD_SIZE = 500f;  // nodes span ±240, 10px padding each side
 
     // Shared node radius values
     const float R_NORMAL = 13f;
@@ -195,7 +195,7 @@ public class BoardView : MonoBehaviour
         var scaler = canvasGO.AddComponent<CanvasScaler>();
         scaler.uiScaleMode         = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         scaler.referenceResolution = new Vector2(CANVAS_W, CANVAS_H);
-        scaler.matchWidthOrHeight  = 0.5f;
+        scaler.matchWidthOrHeight  = 1f; // match height so bottom bar never clips
 
         canvasGO.AddComponent<GraphicRaycaster>();
 
@@ -230,7 +230,8 @@ public class BoardView : MonoBehaviour
         _homeDotImgs         = new Image[2][];
 
         // Panel positions: left (P0) and right (P1), near top
-        Vector2[] panelPositions = { new Vector2(-320f, 310f), new Vector2(320f, 310f) };
+        // Canvas half-width=480; board half-width=250; panel width=220 → center at -(250+10+110)=-370
+        Vector2[] panelPositions = { new Vector2(-370f, 20f), new Vector2(370f, 20f) };
         string[] names  = { "사람", "컴퓨터" };
 
         for (int p = 0; p < 2; p++)
@@ -299,7 +300,7 @@ public class BoardView : MonoBehaviour
         // Outer board panel (wood background)
         var boardPanelRT = UIHelper.CreateRect(_canvas.transform, "BoardPanel",
                                                new Vector2(BOARD_SIZE + 12f, BOARD_SIZE + 12f),
-                                               new Vector2(0f, -20f));
+                                               new Vector2(0f, 30f));
         var boardBorderImg = boardPanelRT.gameObject.AddComponent<Image>();
         boardBorderImg.sprite = UIHelper.CreateRoundedRect(
             Mathf.RoundToInt(BOARD_SIZE + 12f), Mathf.RoundToInt(BOARD_SIZE + 12f), 10);
@@ -560,7 +561,7 @@ public class BoardView : MonoBehaviour
     void BuildBottomBar()
     {
         var barRT = UIHelper.CreateRect(_canvas.transform, "BottomBar",
-                                        new Vector2(CANVAS_W, 80f), new Vector2(0f, -310f));
+                                        new Vector2(CANVAS_W, 80f), new Vector2(0f, -260f));
         var barImg = barRT.gameObject.AddComponent<Image>();
         barImg.sprite = _squareSprite;
         barImg.color  = new Color(0.05f, 0.04f, 0.08f, 0.95f);
