@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;
 using TMPro;
 
 /// <summary>
@@ -218,6 +219,14 @@ public class BoardView : MonoBehaviour
         scaler.matchWidthOrHeight  = 1f; // match height so bottom bar never clips
 
         canvasGO.AddComponent<GraphicRaycaster>();
+
+        // EventSystem is required for UI button clicks
+        if (FindObjectOfType<EventSystem>() == null)
+        {
+            var esGO = new GameObject("EventSystem");
+            esGO.AddComponent<EventSystem>();
+            esGO.AddComponent<StandaloneInputModule>();
+        }
 
         // Full-screen UI root for overlays
         _uiRoot = UIHelper.CreateRect(_canvas.transform, "UIRoot",
