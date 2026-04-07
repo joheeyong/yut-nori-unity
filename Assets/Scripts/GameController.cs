@@ -1,61 +1,101 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Game state machine.
-/// WAITING_THROW      – current player must press the throw button.
-/// WAITING_PIECE_SELECT – human player selects which piece to move.
-/// AI_TURN            – AI is deciding and animating its move.
-/// GAME_OVER          – a player has won.
+/// Central game state machine for Yutnori.
+/// BoardView subscribes to the public events and drives all visual reactions.
 /// </summary>
-public enum GameState
-{
-    WAITING_THROW,
-    WAITING_PIECE_SELECT,
-    AI_TURN,
-    GAME_OVER,
-}
-
 public class GameController : MonoBehaviour
 {
     // -----------------------------------------------------------------------
-    //  Public references (set by BoardView)
+    //  Singleton
     // -----------------------------------------------------------------------
+    public static GameController Instance { get; private set; }
+
+    // -----------------------------------------------------------------------
+    //  References
+    // -----------------------------------------------------------------------
+    /// <summary>Set by BoardView during its Start() call.</summary>
     [HideInInspector] public BoardView boardView;
 
     // -----------------------------------------------------------------------
-    //  Game state
+    //  State
     // -----------------------------------------------------------------------
-    public PieceState[][] Pieces { get; private set; }   // [2][4]
-    public int CurrentPlayer { get; private set; } = 0;  // 0 = human, 1 = AI
-    public GameState State { get; private set; } = GameState.WAITING_THROW;
+    public enum GameState
+    {
+        StartScreen,
+        WaitingThrow,
+        WaitingPieceSelect,
+        AITurn,
+        GameOver
+    }
 
-    // Pending throws from 윷/모 bonuses (and the initial throw)
+    public GameState State { get; private set; } = GameState.WaitingThrow;
+
+    /// <summary>All piece states: [player 0..1][piece 0..3].</summary>
+    public PieceState[][] Pieces { get; private set; }
+
+    /// <summary>0 = human, 1 = AI.</summary>
+    public int CurrentPlayer { get; private set; } = 0;
+
+    /// <summary>Throw results accumulated but not yet consumed (윷/모 bonuses stack here).</summary>
     public List<int> PendingThrows { get; private set; } = new List<int>();
 
-    // The throw the player has selected to use for the next piece selection
+    /// <summary>Most recent throw result (for display purposes).</summary>
+    public int LastThrow { get; private set; } = 0;
+
+    /// <summary>The throw currently being resolved (head of PendingThrows).</summary>
     public int ActiveThrow { get; private set; } = 0;
+
+    // -----------------------------------------------------------------------
+    //  Events  (BoardView subscribes to these)
+    // -----------------------------------------------------------------------
+
+    /// <summary>Fired after every throw. Param: steps (1-5).</summary>
+    public event Action<int> OnThrowResult;
+
+    /// <summary>Fired after a piece moves. Params: player, pieceId, fromNode, toNode. -1 = home/finished.</summary>
+    public event Action<int, int, int, int> OnPieceMove;
+
+    /// <summary>Fired when an opponent group is captured. Params: capturingPlayer, nodeWhereCapture happened.</summary>
+    public event Action<int, int> OnCapture;
+
+    /// <summary>Fired when a piece stacks on a friendly piece. Params: player, node.</summary>
+    public event Action<int, int> OnStack;
+
+    /// <summary>Fired when a player wins. Param: winning player index.</summary>
+    public event Action<int> OnPlayerWin;
+
+    /// <summary>Fired when the active player changes. Param: new current player.</summary>
+    public event Action<int> OnTurnChange;
+
+    /// <summary>Fired when the player earns a bonus throw (윷 or 모).</summary>
+    public event Action OnBonusThrow;
+
+    /// <summary>Fired when a piece finishes (crosses finish line). Params: player, pieceId.</summary>
+    public event Action<int, int> OnPieceFinished;
 
     // -----------------------------------------------------------------------
     //  Unity lifecycle
     // -----------------------------------------------------------------------
+
     void Awake()
     {
+        Instance = this;
         InitPieces();
     }
 
     void Start()
     {
-        // boardView will be set by BoardView.Start() before this runs,
-        // but guard just in case.
-        if (boardView != null)
-            boardView.RefreshAll();
+        boardView?.RefreshAll();
     }
 
     // -----------------------------------------------------------------------
     //  Initialisation
     // -----------------------------------------------------------------------
+
     void InitPieces()
     {
         Pieces = new PieceState[2][];
@@ -67,196 +107,236 @@ public class GameController : MonoBehaviour
         }
     }
 
-    // -----------------------------------------------------------------------
-    //  Button callbacks (called by BoardView UI)
-    // -----------------------------------------------------------------------
-
-    /// <summary>Called when the human player presses the 던지기 button.</summary>
-    public void OnThrowClicked()
+    /// <summary>Resets everything and starts a new game.</summary>
+    public void StartGame()
     {
-        if (State != GameState.WAITING_THROW) return;
-        if (CurrentPlayer != 0) return; // safety: human only
-
-        PerformThrow(0);
+        StopAllCoroutines();
+        PendingThrows.Clear();
+        CurrentPlayer = 0;
+        State = GameState.WaitingThrow;
+        InitPieces();
+        boardView?.RefreshAll();
+        OnTurnChange?.Invoke(CurrentPlayer);
     }
 
-    /// <summary>Called by BoardView when the player clicks a piece token.</summary>
+    // -----------------------------------------------------------------------
+    //  Human-facing callbacks (connected to UI buttons / piece clicks)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Called when the human player presses the 던지기 (throw) button.
+    /// Only acts during WaitingThrow when it is the human's turn.
+    /// </summary>
+    public void OnThrowClicked()
+    {
+        if (State != GameState.WaitingThrow) return;
+        if (CurrentPlayer != 0) return;
+
+        StartCoroutine(HumanThrowSequence());
+    }
+
+    /// <summary>
+    /// Called when the human clicks a piece token on the board.
+    /// Only acts during WaitingPieceSelect for the human player.
+    /// </summary>
     public void OnPieceClicked(int playerId, int pieceId)
     {
-        if (State != GameState.WAITING_PIECE_SELECT) return;
+        if (State != GameState.WaitingPieceSelect) return;
         if (playerId != CurrentPlayer) return;
-        if (CurrentPlayer != 0) return; // AI does not use this path
+        if (CurrentPlayer != 0) return; // AI never goes through here
 
         var piece = Pieces[playerId][pieceId];
         if (piece.IsFinished(BoardData.Routes)) return;
 
-        ApplyMove(pieceId, ActiveThrow);
+        // Verify the move is actually valid before accepting the click
+        var test = GameLogic.TryMove(piece, ActiveThrow, Pieces);
+        if (!test.isValid) return;
+
+        ApplyMove(playerId, pieceId, ActiveThrow);
     }
 
     // -----------------------------------------------------------------------
-    //  Core flow
+    //  Core throw flow
     // -----------------------------------------------------------------------
 
-    /// <summary>
-    /// Executes a yut throw for <paramref name="player"/>,
-    /// accumulates the result in PendingThrows and advances state.
-    /// </summary>
-    void PerformThrow(int player)
+    IEnumerator HumanThrowSequence()
     {
+        // Animate throw visually (BoardView handles the actual animation via event)
         int steps = GameLogic.ThrowYut();
+        LastThrow = steps;
         PendingThrows.Add(steps);
 
-        boardView?.ShowThrowResult(steps, GameLogic.GivesBonus(steps));
+        OnThrowResult?.Invoke(steps);
 
-        // If bonus throw, keep throwing automatically (show result briefly then throw again)
-        if (GameLogic.GivesBonus(steps))
+        bool isBonus = GameLogic.GivesBonus(steps);
+        if (isBonus)
         {
-            // Bonus: show result and allow another throw
-            // For the human, remain in WAITING_THROW so they can see the result
-            // and press the button again.
-            // We do NOT advance to piece selection yet.
-            State = GameState.WAITING_THROW;
+            OnBonusThrow?.Invoke();
+            // Stay in WaitingThrow; human must press button again to collect more / proceed
+            State = GameState.WaitingThrow;
             boardView?.UpdateUI();
-            return;
+            yield break;
         }
 
-        // Move to piece selection
-        AdvanceToPieceSelection(player);
+        // No bonus: advance to piece selection
+        yield return new WaitForSeconds(0.4f);
+        AdvanceToPieceSelection(CurrentPlayer);
     }
 
-    /// <summary>
-    /// Transitions to piece selection state.
-    /// Picks the first pending throw as the active throw.
-    /// </summary>
+    void PerformAIThrow()
+    {
+        int steps = GameLogic.ThrowYut();
+        LastThrow = steps;
+        PendingThrows.Add(steps);
+        OnThrowResult?.Invoke(steps);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Piece-selection advancement
+    // -----------------------------------------------------------------------
+
     void AdvanceToPieceSelection(int player)
     {
         if (PendingThrows.Count == 0) return;
 
         ActiveThrow = PendingThrows[0];
-        // Do not remove yet; we remove after the move is applied.
 
         if (player == 0)
         {
-            // Human: wait for click
-            State = GameState.WAITING_PIECE_SELECT;
+            State = GameState.WaitingPieceSelect;
             boardView?.UpdateUI();
             boardView?.HighlightMovablePieces(player, ActiveThrow);
         }
         else
         {
-            // AI: run coroutine
-            State = GameState.AI_TURN;
+            State = GameState.AITurn;
             boardView?.UpdateUI();
-            StartCoroutine(AITurn());
+            StartCoroutine(AIPlayCoroutine());
         }
     }
 
-    /// <summary>
-    /// Applies a move for the current player's piece identified by <paramref name="pieceId"/>
-    /// using <paramref name="steps"/> steps.
-    /// Handles captures, stacking, finish detection, and turn switching.
-    /// </summary>
-    public void ApplyMove(int pieceId, int steps)
-    {
-        var piece  = Pieces[CurrentPlayer][pieceId];
-        var result = GameLogic.TryMove(piece, steps, Pieces);
+    // -----------------------------------------------------------------------
+    //  Move application
+    // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// Applies a move for the given player/piece using the given step count.
+    /// Fires events, handles captures, stacking, finish, and turn switching.
+    /// </summary>
+    private void ApplyMove(int playerId, int pieceId, int steps)
+    {
+        var piece  = Pieces[playerId][pieceId];
+        var result = GameLogic.TryMove(piece, steps, Pieces);
         if (!result.isValid) return;
 
-        // -- Remove used throw --
+        int fromNode = piece.CurrentNode(BoardData.Routes);
+
+        // Consume this throw
         PendingThrows.RemoveAt(0);
 
-        // -- Move the piece (and its stack) --
+        // Move the piece and any stacked friends
         MoveStack(piece, result.newRouteId, result.newStepIndex);
+
+        int toNode = result.isFinished ? -1 : piece.CurrentNode(BoardData.Routes);
+        OnPieceMove?.Invoke(playerId, pieceId, fromNode, toNode);
 
         bool grantExtraThrow = false;
 
-        // -- Captures --
+        // Handle captures
         if (result.captures.Count > 0)
         {
-            foreach (var captured in result.captures)
-            {
-                // Find all pieces stacked on the same node as the captured piece
-                // and send them all home.
-                var capturedNode = captured.CurrentNode(BoardData.Routes);
-                SendGroupHome(1 - CurrentPlayer, capturedNode);
-            }
+            int captureNode = result.captures[0].CurrentNode(BoardData.Routes);
+            SendGroupHome(1 - playerId, captureNode);
+            OnCapture?.Invoke(playerId, captureNode);
             grantExtraThrow = true;
-            boardView?.ShowMessage($"잡았습니다! 한 번 더!");
         }
 
-        // -- Check win --
-        if (GameLogic.HasWon(CurrentPlayer, Pieces))
+        // Handle stacking on friend
+        if (result.stacksOnFriend)
         {
-            State = GameState.GAME_OVER;
+            OnStack?.Invoke(playerId, toNode);
+        }
+
+        // Handle piece finishing
+        if (result.isFinished)
+        {
+            OnPieceFinished?.Invoke(playerId, pieceId);
+        }
+
+        // Check win
+        if (CheckWin(playerId))
+        {
+            State = GameState.GameOver;
             boardView?.RefreshAll();
-            boardView?.ShowMessage(CurrentPlayer == 0 ? "플레이어 승리!" : "AI 승리!");
+            OnPlayerWin?.Invoke(playerId);
             boardView?.UpdateUI();
             return;
         }
 
-        // -- Extra throw from 윷/모 (already in PendingThrows) or capture --
+        // Grant extra throw for capture (insert one more throw attempt)
         if (grantExtraThrow)
         {
-            // Insert an extra throw for the current player
-            // We'll trigger another throw immediately.
             boardView?.RefreshAll();
             boardView?.UpdateUI();
-            StartCoroutine(DelayedExtraThrow());
+            StartCoroutine(DelayedExtraThrow(playerId));
             return;
         }
 
-        // -- If there are still pending throws (윷/모 accumulated), use next --
+        // If there are still queued pending throws (from accumulated 윷/모), use next
         if (PendingThrows.Count > 0)
         {
             boardView?.RefreshAll();
-            AdvanceToPieceSelection(CurrentPlayer);
+            AdvanceToPieceSelection(playerId);
             return;
         }
 
-        // -- Switch player --
-        CurrentPlayer = 1 - CurrentPlayer;
+        EndTurn();
+    }
+
+    private void EndTurn()
+    {
         boardView?.RefreshAll();
+        CurrentPlayer = 1 - CurrentPlayer;
+        OnTurnChange?.Invoke(CurrentPlayer);
 
         if (CurrentPlayer == 0)
         {
-            State = GameState.WAITING_THROW;
+            State = GameState.WaitingThrow;
             boardView?.UpdateUI();
         }
         else
         {
-            // AI's turn: it throws first
-            State = GameState.AI_TURN;
+            State = GameState.AITurn;
             boardView?.UpdateUI();
             StartCoroutine(AIThrowCoroutine());
         }
     }
 
+    private bool CheckWin(int player)
+    {
+        return GameLogic.HasWon(player, Pieces);
+    }
+
     // -----------------------------------------------------------------------
-    //  Stack helpers
+    //  Stack / home helpers
     // -----------------------------------------------------------------------
 
-    /// <summary>
-    /// Moves <paramref name="lead"/> piece and all friendly pieces stacked on
-    /// the same node to (newRoute, newStep).
-    /// </summary>
     void MoveStack(PieceState lead, int newRoute, int newStep)
     {
         int oldNode = lead.CurrentNode(BoardData.Routes);
 
-        // Collect stacked friends (same node, same player, not the lead itself)
+        // Find all friends stacked on the same node
         var stackedFriends = new List<PieceState>();
         if (oldNode >= 0)
         {
             foreach (var p in Pieces[lead.playerId])
             {
                 if (p.pieceId == lead.pieceId) continue;
-                if (p.CurrentNode(BoardData.Routes) == oldNode)
+                if (!p.IsFinished(BoardData.Routes) && p.CurrentNode(BoardData.Routes) == oldNode)
                     stackedFriends.Add(p);
             }
         }
 
-        // Move everyone
         lead.routeId   = newRoute;
         lead.stepIndex = newStep;
 
@@ -267,14 +347,11 @@ public class GameController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Sends all opponent pieces at <paramref name="node"/> back to home.
-    /// </summary>
     void SendGroupHome(int opponentPlayer, int node)
     {
         foreach (var p in Pieces[opponentPlayer])
         {
-            if (p.CurrentNode(BoardData.Routes) == node)
+            if (!p.IsHome && !p.IsFinished(BoardData.Routes) && p.CurrentNode(BoardData.Routes) == node)
             {
                 p.routeId   = 0;
                 p.stepIndex = -1;
@@ -283,75 +360,81 @@ public class GameController : MonoBehaviour
     }
 
     // -----------------------------------------------------------------------
-    //  AI Coroutines
+    //  AI coroutines
     // -----------------------------------------------------------------------
 
     IEnumerator AIThrowCoroutine()
     {
         yield return new WaitForSeconds(0.8f);
-        PerformThrow(1);
+
+        PerformAIThrow();
         boardView?.UpdateUI();
 
-        // If more bonus throws, keep throwing
-        while (PendingThrows.Count > 1 || (PendingThrows.Count == 1 && GameLogic.GivesBonus(PendingThrows[0])))
+        // Keep throwing if last throw was bonus
+        while (PendingThrows.Count > 0 && GameLogic.GivesBonus(PendingThrows[PendingThrows.Count - 1]))
         {
-            if (PendingThrows.Count == 0) break;
-            // The last throw in the list: if it gives bonus, throw again
-            int last = PendingThrows[PendingThrows.Count - 1];
-            if (!GameLogic.GivesBonus(last)) break;
+            OnBonusThrow?.Invoke();
             yield return new WaitForSeconds(0.6f);
-            int extra = GameLogic.ThrowYut();
-            PendingThrows.Add(extra);
-            boardView?.ShowThrowResult(extra, GameLogic.GivesBonus(extra));
+            PerformAIThrow();
             boardView?.UpdateUI();
         }
 
-        yield return new WaitForSeconds(0.6f);
+        yield return new WaitForSeconds(0.5f);
         AdvanceToPieceSelection(1);
     }
 
-    IEnumerator AITurn()
+    IEnumerator AIPlayCoroutine()
     {
-        yield return new WaitForSeconds(0.7f);
-
-        int chosen = GameLogic.AIPickPiece(1, ActiveThrow, Pieces);
-        if (chosen < 0)
+        // Process all pending throws one at a time
+        while (PendingThrows.Count > 0)
         {
-            // No valid move (shouldn't happen normally); skip
-            PendingThrows.RemoveAt(0);
-            CurrentPlayer = 0;
-            State = GameState.WAITING_THROW;
-            boardView?.RefreshAll();
-            boardView?.UpdateUI();
+            ActiveThrow = PendingThrows[0];
+
+            yield return new WaitForSeconds(0.7f);
+
+            int chosen = GameLogic.AIPickPiece(1, ActiveThrow, Pieces);
+            if (chosen < 0)
+            {
+                // No valid move; consume throw and continue
+                PendingThrows.RemoveAt(0);
+                continue;
+            }
+
+            boardView?.HighlightSinglePiece(1, chosen);
+            yield return new WaitForSeconds(0.5f);
+
+            // ApplyMove may modify PendingThrows (capture bonus / turn switch),
+            // so we call it and then break — ApplyMove will re-enter AIPlayCoroutine
+            // via AdvanceToPieceSelection if needed.
+            ApplyMove(1, chosen, ActiveThrow);
             yield break;
         }
 
-        boardView?.HighlightSinglePiece(1, chosen);
-        yield return new WaitForSeconds(0.5f);
-
-        ApplyMove(chosen, ActiveThrow);
+        // No more throws and no action taken: end turn
+        EndTurn();
     }
 
-    IEnumerator DelayedExtraThrow()
+    IEnumerator DelayedExtraThrow(int player)
     {
         yield return new WaitForSeconds(0.5f);
 
-        if (CurrentPlayer == 0)
+        if (player == 0)
         {
-            State = GameState.WAITING_THROW;
+            State = GameState.WaitingThrow;
             boardView?.UpdateUI();
         }
         else
         {
+            State = GameState.AITurn;
+            boardView?.UpdateUI();
             StartCoroutine(AIThrowCoroutine());
         }
     }
 
     // -----------------------------------------------------------------------
-    //  Public queries
+    //  Public queries (used by BoardView for display)
     // -----------------------------------------------------------------------
 
-    /// <summary>Returns the number of pieces a player has that are finished.</summary>
     public int GetFinishedCount(int player)
     {
         int count = 0;
@@ -360,7 +443,6 @@ public class GameController : MonoBehaviour
         return count;
     }
 
-    /// <summary>Returns the number of home (not yet placed) pieces for a player.</summary>
     public int GetHomeCount(int player)
     {
         int count = 0;
