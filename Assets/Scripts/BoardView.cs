@@ -109,10 +109,25 @@ public class BoardView : MonoBehaviour
     Sprite _squareSprite;
     Sprite _roundedSprite;
 
+    // Card system UI
+    GameObject      _cardOverlayGO;
+    Button[]        _cardOptionBtns   = new Button[3];
+    TextMeshProUGUI[] _cardOptionEmojis = new TextMeshProUGUI[3];
+    TextMeshProUGUI[] _cardOptionNames  = new TextMeshProUGUI[3];
+    TextMeshProUGUI[] _cardOptionDescs  = new TextMeshProUGUI[3];
+    TextMeshProUGUI[] _cardHandLabels   = new TextMeshProUGUI[2];
+    Button          _useCardBtn;
+    TextMeshProUGUI _useCardLabel;
+    TextMeshProUGUI _timerLabel;
+
+    // Trap markers on board
+    Image[]  _trapMarkers;   // [29]
+    Button[] _nodeButtons;   // [29] transparent overlay for trap placement
+
     // Animation coroutine handles
     Coroutine _throwBtnPulseCoroutine;
     Coroutine _panelBorderPulseCoroutine;
-    Coroutine[] _glowCoroutines; // [2*4]
+    Coroutine[] _glowCoroutines; // [2*3]
 
     // Track highlighted pieces for glow management
     readonly HashSet<int> _glowP0 = new HashSet<int>();
@@ -151,6 +166,8 @@ public class BoardView : MonoBehaviour
         _ctrl.OnTurnChange    += HandleTurnChange;
         _ctrl.OnBonusThrow    += HandleBonusThrow;
         _ctrl.OnPieceFinished += HandlePieceFinished;
+        _ctrl.OnCardPickStart += HandleCardPickStart;
+        _ctrl.OnCardEffect    += HandleCardEffect;
 
         _glowCoroutines = new Coroutine[6];
 
@@ -159,6 +176,8 @@ public class BoardView : MonoBehaviour
         BuildPlayerPanels();
         BuildBoardPanel();
         BuildBottomBar();
+        BuildCardOverlay();
+        BuildNodeButtonOverlays();
         BuildMessagePopup();
         BuildWinOverlay();
 
@@ -176,6 +195,8 @@ public class BoardView : MonoBehaviour
         _ctrl.OnTurnChange    -= HandleTurnChange;
         _ctrl.OnBonusThrow    -= HandleBonusThrow;
         _ctrl.OnPieceFinished -= HandlePieceFinished;
+        _ctrl.OnCardPickStart -= HandleCardPickStart;
+        _ctrl.OnCardEffect    -= HandleCardEffect;
     }
 
     // -----------------------------------------------------------------------
@@ -286,6 +307,21 @@ public class BoardView : MonoBehaviour
                     new Vector2(14f, 14f), new Vector2(dotX, -28f), PieceColor(p));
                 dotImg.sprite = _circleSprite;
                 _homeDotImgs[p][i] = dotImg;
+            }
+
+            // Card hand label (shows held card)
+            _cardHandLabels[p] = UIHelper.CreateText(panelRT, "CardLabel",
+                "", 12, C_GOLD_BRIGHT,
+                new Vector2(120f, 18f), new Vector2(-20f, -44f));
+
+            // Use card button (only meaningful for human panel)
+            if (p == 0)
+            {
+                _useCardBtn = UIHelper.CreateButton(panelRT, "UseCardBtn", "카드 사용",
+                    12, new Vector2(80f, 24f), new Vector2(60f, -44f),
+                    new Color(0.3f, 0.6f, 0.2f, 1f), Color.white);
+                _useCardBtn.onClick.AddListener(_ctrl.OnUseCardClicked);
+                _useCardLabel = _useCardBtn.GetComponentInChildren<TextMeshProUGUI>();
             }
         }
     }
@@ -617,6 +653,11 @@ public class BoardView : MonoBehaviour
         _pendingThrowsLabel = UIHelper.CreateText(barRT, "PendingThrows",
             "", 14, C_GOLD_BRIGHT,
             new Vector2(200f, 20f), new Vector2(220f, -24f));
+
+        // --- Timer label (top-left of bar) ---
+        _timerLabel = UIHelper.CreateText(barRT, "TimerLabel",
+            "", 14, new Color(1f, 0.85f, 0.3f, 1f),
+            new Vector2(80f, 20f), new Vector2(-340f, 14f));
     }
 
     // -----------------------------------------------------------------------
@@ -691,6 +732,11 @@ public class BoardView : MonoBehaviour
     {
         PositionAllPieces();
         UpdateUI();
+        RefreshTraps();
+        RefreshCardUI();
+        // Close card overlay once the player has made a choice
+        if (_ctrl.State != GameController.GameState.CardPicking && _cardOverlayGO != null)
+            _cardOverlayGO.SetActive(false);
     }
 
     /// <summary>Syncs all UI labels and interactive states.</summary>
@@ -752,6 +798,26 @@ public class BoardView : MonoBehaviour
         {
             _pendingThrowsLabel.text = "";
         }
+
+        // Timer display (only during human's turn)
+        bool timerActive = _ctrl.CurrentPlayer == 0
+            && (_ctrl.State == GameController.GameState.WaitingThrow
+             || _ctrl.State == GameController.GameState.WaitingPieceSelect);
+        if (_timerLabel != null)
+        {
+            _timerLabel.text  = timerActive ? $"⏱ {Mathf.CeilToInt(_ctrl.TurnTimer)}s" : "";
+            _timerLabel.color = _ctrl.TurnTimer < 5f
+                ? new Color(1f, 0.3f, 0.2f, 1f)
+                : new Color(1f, 0.85f, 0.3f, 1f);
+        }
+
+        // Node buttons active only during trap placement
+        bool trapMode = _ctrl.State == GameController.GameState.TrapPlacing && _ctrl.CurrentPlayer == 0;
+        if (_nodeButtons != null)
+            foreach (var nb in _nodeButtons)
+                if (nb != null) nb.interactable = trapMode;
+
+        RefreshCardUI();
     }
 
     public void HighlightMovablePieces(int player, int steps)
@@ -1244,6 +1310,165 @@ public class BoardView : MonoBehaviour
             s => { if (target != null) target.localScale = Vector3.one * s; }));
         yield return StartCoroutine(UIHelper.AnimateFloat(peakScale, 1f, duration * 0.5f,
             s => { if (target != null) target.localScale = Vector3.one * s; }));
+    }
+
+    // -----------------------------------------------------------------------
+    //  Build – Card overlay (modal pick screen)
+    // -----------------------------------------------------------------------
+
+    void BuildCardOverlay()
+    {
+        _cardOverlayGO = new GameObject("CardOverlay");
+        _cardOverlayGO.transform.SetParent(_uiRoot, false);
+        var rt = _cardOverlayGO.AddComponent<RectTransform>();
+        rt.anchorMin = Vector2.zero;
+        rt.anchorMax = Vector2.one;
+        rt.pivot     = Vector2.one * 0.5f;
+        rt.offsetMin = Vector2.zero;
+        rt.offsetMax = Vector2.zero;
+
+        var bg = _cardOverlayGO.AddComponent<Image>();
+        bg.color = new Color(0f, 0f, 0f, 0.78f);
+
+        // Title
+        UIHelper.CreateText(rt, "Title", "카드를 선택하세요!", 28, C_GOLD_BRIGHT,
+            new Vector2(500f, 50f), new Vector2(0f, 140f))
+            .fontStyle = FontStyles.Bold;
+
+        // Three card option buttons
+        float[] xPositions = { -280f, 0f, 280f };
+        for (int i = 0; i < 3; i++)
+        {
+            int idx = i;
+            var cardRT = UIHelper.CreateRect(rt, $"Card_{i}",
+                new Vector2(220f, 200f), new Vector2(xPositions[i], 0f));
+            var cardBg = cardRT.gameObject.AddComponent<Image>();
+            cardBg.sprite = UIHelper.CreateRoundedRect(220, 200, 16);
+            cardBg.type   = Image.Type.Sliced;
+            cardBg.color  = new Color(0.12f, 0.10f, 0.20f, 1f);
+
+            var btn = cardRT.gameObject.AddComponent<Button>();
+            btn.targetGraphic = cardBg;
+            var cols = btn.colors;
+            cols.normalColor      = Color.white;
+            cols.highlightedColor = new Color(1.2f, 1.2f, 0.6f, 1f);
+            cols.pressedColor     = new Color(0.8f, 0.8f, 0.4f, 1f);
+            btn.colors = cols;
+            btn.onClick.AddListener(() => _ctrl.OnCardOptionChosen(0, idx));
+            _cardOptionBtns[i] = btn;
+
+            _cardOptionEmojis[i] = UIHelper.CreateText(cardRT, "Emoji", "?", 40, Color.white,
+                new Vector2(200f, 60f), new Vector2(0f, 60f));
+
+            _cardOptionNames[i] = UIHelper.CreateText(cardRT, "Name", "", 18, C_GOLD_BRIGHT,
+                new Vector2(200f, 30f), new Vector2(0f, 10f));
+            _cardOptionNames[i].fontStyle = FontStyles.Bold;
+
+            _cardOptionDescs[i] = UIHelper.CreateText(cardRT, "Desc", "", 13, Color.white,
+                new Vector2(190f, 70f), new Vector2(0f, -50f));
+            _cardOptionDescs[i].alignment = TextAlignmentOptions.Center;
+        }
+
+        _cardOverlayGO.SetActive(false);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Build – Node button overlays + trap markers
+    // -----------------------------------------------------------------------
+
+    void BuildNodeButtonOverlays()
+    {
+        _nodeButtons  = new Button[BoardData.NodePositions.Length];
+        _trapMarkers  = new Image[BoardData.NodePositions.Length];
+
+        float scale = BOARD_SIZE / 480f;
+        for (int n = 0; n < BoardData.NodePositions.Length; n++)
+        {
+            var pos = BoardData.NodePositions[n] * scale;
+            int nodeIdx = n;
+
+            // Invisible button (for trap placement)
+            var btnRT = UIHelper.CreateRect(_boardContainer, $"NodeBtn_{n}",
+                new Vector2(44f, 44f), pos);
+            var btnImg = btnRT.gameObject.AddComponent<Image>();
+            btnImg.color = Color.clear;
+            var btn = btnRT.gameObject.AddComponent<Button>();
+            btn.targetGraphic = btnImg;
+            btn.onClick.AddListener(() => _ctrl.OnNodeClicked(nodeIdx));
+            _nodeButtons[n] = btn;
+
+            // Trap marker (bomb emoji placeholder using colored circle)
+            var trapRT = UIHelper.CreateRect(_boardContainer, $"TrapMarker_{n}",
+                new Vector2(20f, 20f), pos + new Vector2(0f, 10f));
+            var trapImg = trapRT.gameObject.AddComponent<Image>();
+            trapImg.sprite = UIHelper.CreateCircleSprite(32);
+            trapImg.color  = new Color(1f, 0.3f, 0.1f, 0.85f);
+            trapImg.raycastTarget = false;
+            _trapMarkers[n] = trapImg;
+            trapRT.gameObject.SetActive(false);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    //  Card / trap refresh
+    // -----------------------------------------------------------------------
+
+    void RefreshTraps()
+    {
+        if (_trapMarkers == null) return;
+        for (int n = 0; n < _trapMarkers.Length; n++)
+            if (_trapMarkers[n] != null)
+                _trapMarkers[n].gameObject.SetActive(false);
+
+        foreach (var trap in _ctrl.Traps)
+        {
+            if (trap.nodeIndex >= 0 && trap.nodeIndex < _trapMarkers.Length
+                && _trapMarkers[trap.nodeIndex] != null)
+                _trapMarkers[trap.nodeIndex].gameObject.SetActive(true);
+        }
+    }
+
+    void RefreshCardUI()
+    {
+        for (int p = 0; p < 2; p++)
+        {
+            if (_cardHandLabels[p] == null) continue;
+            var card = _ctrl.PlayerCard[p];
+            _cardHandLabels[p].text = card == CardType.None
+                ? ""
+                : CardInfo.Emoji(card) + " " + CardInfo.Name(card);
+        }
+
+        bool hasCard = _ctrl.PlayerCard[0] != CardType.None;
+        bool canUse  = hasCard && (_ctrl.State == GameController.GameState.WaitingThrow
+                                || _ctrl.State == GameController.GameState.WaitingPieceSelect);
+        if (_useCardBtn != null)  _useCardBtn.interactable = canUse;
+        if (_useCardLabel != null) _useCardLabel.color = canUse ? Color.white : new Color(0.5f,0.5f,0.5f,1f);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Event handlers – card system
+    // -----------------------------------------------------------------------
+
+    void HandleCardPickStart(int player, CardType[] options)
+    {
+        if (player != 0) return; // AI auto-picks; only show UI for human
+
+        for (int i = 0; i < 3; i++)
+        {
+            var c = options[i];
+            _cardOptionEmojis[i].text = CardInfo.Emoji(c);
+            _cardOptionNames[i].text  = CardInfo.Name(c);
+            _cardOptionDescs[i].text  = CardInfo.Desc(c);
+        }
+        _cardOverlayGO.SetActive(true);
+    }
+
+    void HandleCardEffect(string msg)
+    {
+        _cardOverlayGO?.SetActive(false);
+        RefreshAll();
+        ShowPopupMessage(msg, C_GOLD_BRIGHT);
     }
 
     // -----------------------------------------------------------------------
