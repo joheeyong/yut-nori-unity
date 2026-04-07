@@ -121,7 +121,6 @@ public class BoardView : MonoBehaviour
     // Diagonal-line node index sets (for line colour lookup)
     static readonly HashSet<(int, int)> DiagLines = new HashSet<(int, int)>
     {
-        (5, 20), (20, 21), (21, 22),
         (10, 25), (25, 26), (26, 22),
         (15, 27), (27, 28), (28, 22),
         (22, 23), (23, 24), (24, 0),
@@ -153,7 +152,7 @@ public class BoardView : MonoBehaviour
         _ctrl.OnBonusThrow    += HandleBonusThrow;
         _ctrl.OnPieceFinished += HandlePieceFinished;
 
-        _glowCoroutines = new Coroutine[8];
+        _glowCoroutines = new Coroutine[6];
 
         BuildCanvas();
         BuildBackground();
@@ -275,12 +274,12 @@ public class BoardView : MonoBehaviour
 
             // Score label
             _playerScoreLabels[p] = UIHelper.CreateText(panelRT, "ScoreLabel",
-                "완료: 0/4", 13, Color.white,
+                "완료: 0/3", 13, Color.white,
                 new Vector2(200f, 20f), new Vector2(0f, -6f));
 
-            // Home dots row (4 dots showing piece status)
-            _homeDotImgs[p] = new Image[4];
-            for (int i = 0; i < 4; i++)
+            // Home dots row (3 dots showing piece status)
+            _homeDotImgs[p] = new Image[3];
+            for (int i = 0; i < 3; i++)
             {
                 float dotX = (p == 0) ? (-60f + i * 20f) : (-60f + i * 20f);
                 var dotImg = UIHelper.CreateImage(panelRT, $"HomeDot_{i}",
@@ -449,14 +448,14 @@ public class BoardView : MonoBehaviour
 
         for (int p = 0; p < 2; p++)
         {
-            _pieceGOs[p]         = new GameObject[4];
-            _pieceImgs[p]        = new Image[4];
-            _pieceRTs[p]         = new RectTransform[4];
-            _pieceShadowGOs[p]   = new GameObject[4];
-            _pieceGlowImgs[p]    = new Image[4];
-            _pieceCountLabels[p] = new TextMeshProUGUI[4];
+            _pieceGOs[p]         = new GameObject[3];
+            _pieceImgs[p]        = new Image[3];
+            _pieceRTs[p]         = new RectTransform[3];
+            _pieceShadowGOs[p]   = new GameObject[3];
+            _pieceGlowImgs[p]    = new Image[3];
+            _pieceCountLabels[p] = new TextMeshProUGUI[3];
 
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 3; i++)
             {
                 // Shadow
                 var shadowGO = new GameObject($"PieceShadow_P{p}_{i}");
@@ -705,13 +704,13 @@ public class BoardView : MonoBehaviour
             bool isCurrent = _ctrl.CurrentPlayer == p && _ctrl.State != GameController.GameState.GameOver;
             int  finished  = _ctrl.GetFinishedCount(p);
 
-            _playerScoreLabels[p].text = $"완료: {finished}/4";
+            _playerScoreLabels[p].text = $"완료: {finished}/3";
             _playerTurnLabels[p].text  = isCurrent
                 ? (p == 0 ? "당신의 차례" : "AI 생각중...")
                 : "";
 
             // Update home dots colour to reflect piece status
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 3; i++)
             {
                 var piece = _ctrl.Pieces[p][i];
                 Color dotColor;
@@ -830,7 +829,7 @@ public class BoardView : MonoBehaviour
         // Collect node occupants for offset calculation
         var nodeOccupants = new Dictionary<int, List<(int p, int i)>>();
         for (int p = 0; p < 2; p++)
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 3; i++)
         {
             var piece = _ctrl.Pieces[p][i];
             int node  = piece.CurrentNode(BoardData.Routes);
@@ -843,7 +842,7 @@ public class BoardView : MonoBehaviour
         int[] homeSlot = { 0, 0 };
 
         for (int p = 0; p < 2; p++)
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 3; i++)
         {
             var piece = _ctrl.Pieces[p][i];
             var go    = _pieceGOs[p][i];
@@ -853,7 +852,7 @@ public class BoardView : MonoBehaviour
             {
                 // Show as dimmed token in the home area (right of panel dots)
                 go.SetActive(true);
-                float fx = (p == 0 ? -315f : 205f) + (homeSlot[p] % 4) * 22f;
+                float fx = (p == 0 ? -315f : 205f) + (homeSlot[p] % 3) * 22f;
                 rt.anchoredPosition = new Vector2(fx, -300f);
                 rt.sizeDelta        = new Vector2(PIECE_SIZE_HOME, PIECE_SIZE_HOME);
                 _pieceImgs[p][i].color = new Color(PieceColor(p).r, PieceColor(p).g,
@@ -925,7 +924,7 @@ public class BoardView : MonoBehaviour
     {
         var set = player == 0 ? _glowP0 : _glowP1;
         set.Add(pieceId);
-        int idx = player * 4 + pieceId;
+        int idx = player * 3 + pieceId;
         if (_glowCoroutines[idx] != null) StopCoroutine(_glowCoroutines[idx]);
         _glowCoroutines[idx] = StartCoroutine(GlowPulse(player, pieceId));
     }
@@ -934,12 +933,12 @@ public class BoardView : MonoBehaviour
     {
         _glowP0.Clear();
         _glowP1.Clear();
-        for (int idx = 0; idx < 8; idx++)
+        for (int idx = 0; idx < 6; idx++)
         {
             if (_glowCoroutines[idx] != null) { StopCoroutine(_glowCoroutines[idx]); _glowCoroutines[idx] = null; }
         }
         for (int p = 0; p < 2; p++)
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 3; i++)
         {
             if (_pieceGlowImgs[p][i] != null)
                 _pieceGlowImgs[p][i].color = Color.clear;

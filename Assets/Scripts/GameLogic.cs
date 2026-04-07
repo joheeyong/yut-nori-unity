@@ -1,234 +1,247 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-/// <summary>
-/// Result of a TryMove call.
-/// </summary>
 public struct MoveResult
 {
     public bool isValid;
     public int  newRouteId;
     public int  newStepIndex;
     public bool isFinished;
-    public List<PieceState> captures;    // opponent pieces that were captured
-    public bool stacksOnFriend;          // landed on a friendly piece
+    public List<PieceState> captures;
+    public bool stacksOnFriend;
 }
 
-/// <summary>
-/// Pure game logic — no MonoBehaviour, no Unity scene objects.
-/// All methods are static.
-/// </summary>
 public static class GameLogic
 {
-    // -----------------------------------------------------------------------
-    //  Yut throwing
-    // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Simulates throwing 4 yut sticks.
-    /// Each stick is 50/50 flat (0) or rounded (1).
-    /// Count of flat sides facing up:
-    ///   0 flat = 모 = 5 steps
-    ///   1 flat = 도 = 1 step
-    ///   2 flat = 개 = 2 steps
-    ///   3 flat = 걸 = 3 steps
-    ///   4 flat = 윷 = 4 steps
-    /// </summary>
+    // Weighted probabilities: 빽도 3.84%, 도 11.52%, 개 34.56%, 걸 34.56%, 윷 12.96%, 모 2.56%
     public static int ThrowYut()
     {
-        int flatCount = 0;
-        for (int i = 0; i < 4; i++)
-            flatCount += Random.Range(0, 2); // 0 or 1
-
-        // flatCount 0 → 5 steps (모)
-        return flatCount == 0 ? 5 : flatCount;
+        float r = Random.value;
+        if (r < 0.0384f) return -1;
+        r -= 0.0384f;
+        if (r < 0.1152f) return 1;
+        r -= 0.1152f;
+        if (r < 0.3456f) return 2;
+        r -= 0.3456f;
+        if (r < 0.3456f) return 3;
+        r -= 0.3456f;
+        if (r < 0.1296f) return 4;
+        return 5;
     }
 
-    /// <summary>
-    /// Returns true if the throw result grants an extra throw (윷=4 or 모=5).
-    /// </summary>
+    public static int ThrowTenSticks()
+    {
+        int front = 0;
+        for (int i = 0; i < 10; i++)
+            if (Random.value < 0.6f) front++;
+        return Mathf.Max(1, front);
+    }
+
     public static bool GivesBonus(int steps) => steps == 4 || steps == 5;
 
-    // -----------------------------------------------------------------------
-    //  Movement
-    // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Attempts to move <paramref name="piece"/> by <paramref name="steps"/> spaces.
-    /// Handles route switching at shortcut corners and captures/stacking.
-    /// </summary>
     public static MoveResult TryMove(PieceState piece, int steps, PieceState[][] allPieces)
     {
         var result = new MoveResult
         {
-            isValid      = false,
-            newRouteId   = piece.routeId,
-            newStepIndex = piece.stepIndex,
-            isFinished   = false,
-            captures     = new List<PieceState>(),
-            stacksOnFriend = false,
+            isValid = false, newRouteId = piece.routeId,
+            newStepIndex = piece.stepIndex, isFinished = false,
+            captures = new List<PieceState>(), stacksOnFriend = false,
         };
 
-        if (piece.IsFinished(BoardData.Routes))
-            return result; // cannot move a finished piece
+        if (piece.IsFinished(BoardData.Routes)) return result;
 
-        // ---- Compute new step index ----------------------------------------
-        int newStep = piece.stepIndex + steps;
+        if (steps < 0)
+            return TryMoveBackward(piece, Mathf.Abs(steps), allPieces);
 
-        // If piece was at home, moving 1 step puts it at stepIndex 0 (node 1).
-        // Home is stepIndex -1, so +steps gives us (steps - 1) as the final index.
-        // That is already correct: -1 + 1 = 0.
-
+        int newStep  = piece.stepIndex + steps;
         int newRoute = piece.routeId;
 
-        // ---- Check if the piece finishes ------------------------------------
-        int routeLen = BoardData.Routes[newRoute].Length;
-        if (newStep >= routeLen)
+        if (newStep >= BoardData.Routes[newRoute].Length)
         {
-            result.isValid      = true;
-            result.newRouteId   = newRoute;
-            result.newStepIndex = newStep;
-            result.isFinished   = true;
+            result.isValid = true; result.newRouteId = newRoute;
+            result.newStepIndex = newStep; result.isFinished = true;
             return result;
         }
 
-        // ---- Shortcut detection (only on Route 0) ---------------------------
-        // A piece on Route 0 switches route when it lands EXACTLY on a corner.
-        if (newRoute == 0)
+        if (newRoute == 0 && BoardData.TryGetShortcutRoute(newStep, out int sc))
+            newRoute = sc;
+
+        int landNode = BoardData.Routes[newRoute][newStep];
+
+        int opp = 1 - piece.playerId;
+        result.captures = GetPiecesAtNode(landNode, opp, allPieces);
+        var friends = GetPiecesAtNode(landNode, piece.playerId, allPieces);
+        friends.RemoveAll(p => p.pieceId == piece.pieceId);
+        result.stacksOnFriend = friends.Count > 0;
+
+        result.isValid = true; result.newRouteId = newRoute; result.newStepIndex = newStep;
+        return result;
+    }
+
+    static MoveResult TryMoveBackward(PieceState piece, int steps, PieceState[][] allPieces)
+    {
+        var result = new MoveResult { captures = new List<PieceState>() };
+        if (piece.IsHome) { result.isValid = false; return result; }
+
+        int newStep = piece.stepIndex - steps;
+        if (newStep < 0)
         {
-            if (BoardData.TryGetShortcutRoute(newStep, out int shortcutRoute))
+            result.isValid = true; result.newRouteId = 0;
+            result.newStepIndex = -1; return result;
+        }
+        result.isValid = true; result.newRouteId = piece.routeId; result.newStepIndex = newStep;
+        return result;
+    }
+
+    // PUSH_BACK card: random on-board opponent piece goes back 2
+    public static PieceState ApplyPushBack(int opponent, PieceState[][] pieces)
+    {
+        var cands = new List<PieceState>();
+        foreach (var p in pieces[opponent])
+            if (!p.IsHome && !p.IsFinished(BoardData.Routes)) cands.Add(p);
+        if (cands.Count == 0) return null;
+
+        var target = cands[Random.Range(0, cands.Count)];
+        int ns = target.stepIndex - 2;
+        if (ns < 0) { target.stepIndex = -1; target.routeId = 0; }
+        else          target.stepIndex = ns;
+        return target;
+    }
+
+    // DESTINY_DICE: 4 random effects
+    public static (int effect, string desc, PieceState piece)
+        ApplyDestinyDice(int player, PieceState[][] pieces)
+    {
+        int opp = 1 - player;
+        int eff = Random.Range(0, 4);
+
+        PieceState RandOnBoard(int p)
+        {
+            var list = new List<PieceState>();
+            foreach (var pc in pieces[p])
+                if (!pc.IsHome && !pc.IsFinished(BoardData.Routes)) list.Add(pc);
+            return list.Count > 0 ? list[Random.Range(0, list.Count)] : null;
+        }
+
+        switch (eff)
+        {
+            case 0:
             {
-                newRoute = shortcutRoute;
-                // stepIndex stays the same — both routes share the same prefix up to
-                // and including that corner node (node 5/10/15).
+                var t = RandOnBoard(opp);
+                if (t != null) { t.stepIndex = -1; t.routeId = 0; }
+                return (0, "상대 말 1개 잡기!", t);
+            }
+            case 1:
+            {
+                var t = RandOnBoard(player);
+                if (t != null) { t.stepIndex = -1; t.routeId = 0; }
+                return (1, "내 말 1개 잡힘...", t);
+            }
+            case 2:
+            {
+                var t = RandOnBoard(player);
+                if (t != null)
+                {
+                    var mv = TryMove(t, 3, pieces);
+                    if (mv.isValid) { t.routeId = mv.newRouteId; t.stepIndex = mv.newStepIndex; }
+                }
+                return (2, "내 말 3칸 전진!", t);
+            }
+            default:
+            {
+                var t = RandOnBoard(opp);
+                if (t != null)
+                {
+                    var mv = TryMove(t, 3, pieces);
+                    if (mv.isValid) { t.routeId = mv.newRouteId; t.stepIndex = mv.newStepIndex; }
+                }
+                return (3, "상대 말 3칸 전진...", t);
             }
         }
-
-        // ---- Determine the landing node ------------------------------------
-        int landingNode = BoardData.Routes[newRoute][newStep];
-
-        // ---- Check for captures and stacking --------------------------------
-        int opponentId = 1 - piece.playerId;
-
-        // Collect opponent pieces at the landing node
-        var opponentsAtNode = GetPiecesAtNode(landingNode, opponentId, allPieces);
-
-        // Collect friendly pieces at the landing node (exclude current piece's group)
-        var friendsAtNode = GetPiecesAtNode(landingNode, piece.playerId, allPieces);
-        // Exclude the piece itself from friend check
-        friendsAtNode.RemoveAll(p => p.pieceId == piece.pieceId);
-
-        if (opponentsAtNode.Count > 0)
-        {
-            result.captures = opponentsAtNode;
-        }
-        else if (friendsAtNode.Count > 0)
-        {
-            result.stacksOnFriend = true;
-        }
-
-        result.isValid      = true;
-        result.newRouteId   = newRoute;
-        result.newStepIndex = newStep;
-        return result;
     }
 
-    // -----------------------------------------------------------------------
-    //  Helpers
-    // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Returns all pieces belonging to <paramref name="player"/> that are
-    /// currently on <paramref name="node"/> (node index 0-28).
-    /// </summary>
-    public static List<PieceState> GetPiecesAtNode(int node, int player, PieceState[][] allPieces)
+    public static void ApplySwap(PieceState a, PieceState b)
     {
-        var result = new List<PieceState>();
-        if (node < 0) return result;
-
-        foreach (var piece in allPieces[player])
-        {
-            if (piece.IsFinished(BoardData.Routes)) continue;
-            if (piece.IsHome) continue;
-            if (piece.CurrentNode(BoardData.Routes) == node)
-                result.Add(piece);
-        }
-        return result;
+        (a.routeId, b.routeId)     = (b.routeId, a.routeId);
+        (a.stepIndex, b.stepIndex) = (b.stepIndex, a.stepIndex);
     }
 
-    /// <summary>
-    /// Returns all non-finished pieces for <paramref name="player"/>.
-    /// (Pieces that can potentially be selected for a move.)
-    /// </summary>
-    public static List<PieceState> GetMovablePieces(int player, PieceState[][] allPieces)
+    public static List<PieceState> GetPiecesAtNode(int node, int player, PieceState[][] all)
     {
-        var result = new List<PieceState>();
-        foreach (var piece in allPieces[player])
+        var res = new List<PieceState>();
+        if (node < 0) return res;
+        foreach (var p in all[player])
         {
-            if (!piece.IsFinished(BoardData.Routes))
-                result.Add(piece);
+            if (p.IsFinished(BoardData.Routes) || p.IsHome) continue;
+            if (p.CurrentNode(BoardData.Routes) == node) res.Add(p);
         }
-        return result;
+        return res;
     }
 
-    /// <summary>
-    /// Checks whether all pieces of <paramref name="player"/> are finished.
-    /// </summary>
-    public static bool HasWon(int player, PieceState[][] allPieces)
+    public static List<PieceState> GetMovablePieces(int player, PieceState[][] all)
     {
-        foreach (var piece in allPieces[player])
-        {
-            if (!piece.IsFinished(BoardData.Routes))
-                return false;
-        }
+        var res = new List<PieceState>();
+        foreach (var p in all[player])
+            if (!p.IsFinished(BoardData.Routes)) res.Add(p);
+        return res;
+    }
+
+    public static bool HasWon(int player, PieceState[][] all)
+    {
+        foreach (var p in all[player])
+            if (!p.IsFinished(BoardData.Routes)) return false;
         return true;
     }
 
-    // -----------------------------------------------------------------------
-    //  AI decision
-    // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Simple AI: picks the best piece to move given <paramref name="steps"/>.
-    /// Priority: capture > stack with friend > move furthest piece.
-    /// Returns the pieceId to move, or -1 if no valid move exists.
-    /// </summary>
-    public static int AIPickPiece(int aiPlayer, int steps, PieceState[][] allPieces)
+    public static int AIPickPiece(int aiPlayer, int steps, PieceState[][] all)
     {
-        var movable = GetMovablePieces(aiPlayer, allPieces);
-        if (movable.Count == 0) return -1;
+        int opp = 1 - aiPlayer;
+        int best = int.MinValue, bestId = -1;
 
-        int bestPieceId    = -1;
-        int bestPriority   = -1; // higher = better
-        int bestProgress   = -1; // for tie-breaking: further along = better
-
-        foreach (var piece in movable)
+        foreach (var piece in all[aiPlayer])
         {
-            var res = TryMove(piece, steps, allPieces);
+            if (piece.IsFinished(BoardData.Routes)) continue;
+            if (steps < 0 && piece.IsHome) continue;
+
+            var res = TryMove(piece, steps, all);
             if (!res.isValid) continue;
 
-            int priority;
-            if (res.captures.Count > 0)
-                priority = 3; // capture
-            else if (res.stacksOnFriend)
-                priority = 2; // stack
-            else if (res.isFinished)
-                priority = 4; // finish a piece – best possible
-            else
-                priority = 1; // plain move
+            int score = EvalMove(piece, res, all, aiPlayer, opp);
+            if (score > best) { best = score; bestId = piece.pieceId; }
+        }
+        return bestId;
+    }
 
-            // Progress = how far along the new position is (higher = closer to finish)
-            int progress = res.isFinished ? 9999 : res.newStepIndex;
+    static int EvalMove(PieceState piece, MoveResult res,
+                        PieceState[][] all, int player, int opp)
+    {
+        int score = 0;
+        if (res.isFinished) return 1000;
 
-            if (priority > bestPriority ||
-               (priority == bestPriority && progress > bestProgress))
+        score += res.newStepIndex * 10;
+        score += res.captures.Count * 500;
+        if (res.stacksOnFriend) score += 30;
+        if (piece.IsHome) score += 50;
+        if (res.newRouteId != 0) score += 80;
+
+        if (res.newStepIndex >= 0 && res.newStepIndex < BoardData.Routes[res.newRouteId].Length)
+        {
+            int node = BoardData.Routes[res.newRouteId][res.newStepIndex];
+            foreach (var op in all[opp])
             {
-                bestPriority = priority;
-                bestProgress = progress;
-                bestPieceId  = piece.pieceId;
+                if (op.IsHome || op.IsFinished(BoardData.Routes)) continue;
+                for (int s = 1; s <= 5; s++)
+                {
+                    var or2 = TryMove(op, s, all);
+                    if (!or2.isValid || or2.isFinished) continue;
+                    if (or2.newStepIndex < BoardData.Routes[or2.newRouteId].Length &&
+                        BoardData.Routes[or2.newRouteId][or2.newStepIndex] == node)
+                        score -= 50 * (6 - s);
+                }
             }
         }
 
-        return bestPieceId;
+        score += Random.Range(-15, 16);
+        return score;
     }
 }
