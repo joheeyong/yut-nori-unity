@@ -110,6 +110,14 @@ public class BoardView : MonoBehaviour
     Sprite _squareSprite;
     Sprite _roundedSprite;
 
+    // Loaded asset sprites (Resources.Load – null-safe, falls back to procedural)
+    Sprite _spPawn;
+    Sprite _spToken;
+    Sprite _spPanelRed;
+    Sprite _spPanelBlue;
+    Sprite _spBtnThrow;
+    Sprite _spBtnFlatYellow;
+
     // Card system UI
     GameObject      _cardOverlayGO;
     Button[]        _cardOptionBtns   = new Button[3];
@@ -148,10 +156,18 @@ public class BoardView : MonoBehaviour
 
     void Start()
     {
-        // Shared sprites
+        // Shared sprites (procedural fallbacks)
         _circleSprite  = UIHelper.CreateCircleSprite(64);
         _squareSprite  = MakeWhiteSquare();
         _roundedSprite = UIHelper.CreateRoundedRect(160, 60, 14);
+
+        // Load asset sprites from Resources (null if not found – falls back to procedural)
+        _spPawn           = Resources.Load<Sprite>("Sprites/Pieces/pawn");
+        _spToken          = Resources.Load<Sprite>("Sprites/Pieces/token");
+        _spPanelRed       = Resources.Load<Sprite>("Sprites/UI/panel_red");
+        _spPanelBlue      = Resources.Load<Sprite>("Sprites/UI/panel_blue");
+        _spBtnThrow       = Resources.Load<Sprite>("Sprites/UI/btn_throw");
+        _spBtnFlatYellow  = Resources.Load<Sprite>("Sprites/UI/btn_flat_yellow");
 
         // Wire up controller
         _ctrl = gameObject.GetComponent<GameController>();
@@ -269,11 +285,21 @@ public class BoardView : MonoBehaviour
                                               new Vector2(220f, 95f), panelPositions[p]);
             _playerPanels[p] = panelRT;
 
-            // Background
+            // Background – use loaded asset sprite when available, else procedural rounded rect
             var bgImg = panelRT.gameObject.AddComponent<Image>();
-            bgImg.sprite = UIHelper.CreateRoundedRect(220, 95, 12);
-            bgImg.type   = Image.Type.Sliced;
-            bgImg.color  = PanelColor(p);
+            Sprite panelAssetSprite = (p == 0) ? _spPanelRed : _spPanelBlue;
+            if (panelAssetSprite != null)
+            {
+                bgImg.sprite = panelAssetSprite;
+                bgImg.type   = Image.Type.Sliced;
+                bgImg.color  = Color.white;   // tint white so asset colours show through
+            }
+            else
+            {
+                bgImg.sprite = UIHelper.CreateRoundedRect(220, 95, 12);
+                bgImg.type   = Image.Type.Sliced;
+                bgImg.color  = PanelColor(p);
+            }
             bgImg.raycastTarget = false;
 
             // Gold border ring (separate image slightly larger, rendered behind bg)
@@ -537,12 +563,23 @@ public class BoardView : MonoBehaviour
                 outlineRT.anchorMin = outlineRT.anchorMax = outlineRT.pivot = Vector2.one * 0.5f;
                 outlineRT.sizeDelta = new Vector2(PIECE_SIZE + 2f, PIECE_SIZE + 2f);
 
-                // Main piece circle
+                // Main piece – use Kenney pawn/token sprite when available, else circle fallback
                 var pieceGO = new GameObject($"Piece_P{p}_{i}");
                 pieceGO.transform.SetParent(_boardContainer, false);
                 var pieceImg = pieceGO.AddComponent<Image>();
-                pieceImg.sprite = _circleSprite;
-                pieceImg.color  = PieceColor(p);
+                // P0 uses pawn sprite, P1 uses token sprite for visual distinction
+                Sprite pieceAssetSprite = (p == 0) ? _spPawn : _spToken;
+                if (pieceAssetSprite != null)
+                {
+                    pieceImg.sprite              = pieceAssetSprite;
+                    pieceImg.preserveAspect      = true;
+                    pieceImg.color               = PieceColor(p);
+                }
+                else
+                {
+                    pieceImg.sprite = _circleSprite;
+                    pieceImg.color  = PieceColor(p);
+                }
                 pieceImg.raycastTarget = true;
 
                 var pieceRT = pieceGO.GetComponent<RectTransform>();
@@ -641,6 +678,14 @@ public class BoardView : MonoBehaviour
             C_THROW_BTN, Color.white);
         _throwBtn.onClick.AddListener(_ctrl.OnThrowClicked);
         _throwBtnImg = _throwBtn.GetComponent<Image>();
+
+        // Apply loaded button sprite if available
+        if (_spBtnFlatYellow != null)
+        {
+            _throwBtnImg.sprite = _spBtnFlatYellow;
+            _throwBtnImg.type   = Image.Type.Sliced;
+            _throwBtnImg.color  = C_THROW_BTN;
+        }
 
         // Override button colors for visual feedback
         var colors            = _throwBtn.colors;
